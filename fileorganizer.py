@@ -88,7 +88,7 @@ def get_initial_analysis():
     """
     try:
         # --- CHANGE #2: Initialize model and call generate_content ---
-        model = genai.GenerativeModel('')
+        model = genai.GenerativeModel('gemini-2.5-flash-lite-latest')
         response = model.generate_content(prompt)
         analysis_text = response.text.strip()
         return {"analysis": analysis_text, "all_docs": all_docs}
@@ -290,3 +290,4 @@ def execute_the_plan(plan, all_docs, destination_root_str):
     summary = f"Execution complete. Moved {files_moved}/{total_files_in_plan} files. Encountered {errors_encountered} errors."
 
     return {"message": summary, "log": log}
+
