@@ -70,7 +70,7 @@ This is a web-based tool that uses AI to help you make sense of and organize a m
 4.  **Set up your environment variables:**
     -   Copy the example file:
         ```bash
-        cp .env.example .env
+        copy .env.example .env
         ```
     -   Open the `.env` file in a text editor and add your `GOOGLE_API_KEY` and a new `SECRET_KEY`. For the secret key, you can generate a secure random key by running this in a Python terminal: `import os; print(os.urandom(24).hex())`
 
