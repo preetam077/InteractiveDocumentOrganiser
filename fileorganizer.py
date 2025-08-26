@@ -88,7 +88,7 @@ def get_initial_analysis():
     """
     try:
         # --- CHANGE #2: Initialize model and call generate_content ---
-        model = genai.GenerativeModel('gemini-2.5-flash-lite-latest')
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
         response = model.generate_content(prompt)
         analysis_text = response.text.strip()
         return {"analysis": analysis_text, "all_docs": all_docs}
@@ -106,7 +106,7 @@ def answer_a_question(question: str, all_docs: list, current_analysis: str):
         # Step 1: Initialize the model WITH the tool definition
         # The library inspects the function to create the schema.
         model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash-lite-latest',
+            model_name='gemini-2.5-flash-lite',
             tools=[search_documents]
         )
         
@@ -232,7 +232,7 @@ def get_organization_plan(all_docs, current_analysis):
     """
     try:
         # --- CHANGE #4: Update this function as well ---
-        model = genai.GenerativeModel('gemini-2.5-flash-lite-latest')
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
         response = model.generate_content(prompt)
         response_text = response.text.strip().replace('```json', '').replace('```', '')
         parts = response_text.split('-----', 2)
@@ -290,4 +290,5 @@ def execute_the_plan(plan, all_docs, destination_root_str):
     summary = f"Execution complete. Moved {files_moved}/{total_files_in_plan} files. Encountered {errors_encountered} errors."
 
     return {"message": summary, "log": log}
+
 
