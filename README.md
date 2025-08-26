@@ -46,7 +46,7 @@ This is a web-based tool that uses AI to help you make sense of and organize a m
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/preetam077/InteractiveDocumentOrganiser.git](https://github.com/preetam077/InteractiveDocumentOrganiser.git)
+    git clone https://github.com/preetam077/InteractiveDocumentOrganiser.git
     cd InteractiveDocumentOrganiser
     ```
 
