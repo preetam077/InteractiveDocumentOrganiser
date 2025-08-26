@@ -106,7 +106,7 @@ def answer_a_question(question: str, all_docs: list, current_analysis: str):
         # Step 1: Initialize the model WITH the tool definition
         # The library inspects the function to create the schema.
         model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash-lite',
+            model_name='gemini-1.5-flash-latest',
             tools=[search_documents]
         )
         
@@ -290,5 +290,6 @@ def execute_the_plan(plan, all_docs, destination_root_str):
     summary = f"Execution complete. Moved {files_moved}/{total_files_in_plan} files. Encountered {errors_encountered} errors."
 
     return {"message": summary, "log": log}
+
 
 
