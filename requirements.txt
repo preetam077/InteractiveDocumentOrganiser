@@ -1,0 +1,23 @@
+# Flask and extensions
+flask
+Flask-Session
+SQLAlchemy
+
+# AI and Machine Learning
+google-generativeai
+sentence-transformers
+scikit-learn
+torch
+nltk
+numpy
+
+# Data Handling
+pandas
+openpyxl
+
+# Document Processing
+docling
+docling-core
+
+# Environment variables
+python-dotenv
