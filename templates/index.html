@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI File Organizer</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            background-color: #f4f7f9;
+            color: #333;
+        }
+        .container { 
+            max-width: 900px; 
+            margin: 2em auto; 
+            padding: 1em 2em;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 0.5em;
+            margin-bottom: 1em;
+        }
+        h1 {
+            color: #1a73e8;
+            margin: 0; /* Removed default margins */
+        }
+        h2 {
+            color: #444;
+            margin-top: 2em;
+        }
+        .output { 
+            background-color: #fafafa; 
+            border: 1px solid #e0e0e0; 
+            padding: 1em; 
+            margin-top: 1em; 
+            white-space: pre-wrap; 
+            font-family: "Consolas", "Monaco", monospace;
+            font-size: 0.9em;
+            max-height: 300px;
+            overflow-y: auto;
+            border-radius: 4px;
+        }
+        input[type="text"] {
+            width: 95%;
+            padding: 0.8em;
+            font-size: 1em;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 0.5em;
+        }
+        button { 
+            font-size: 1em; 
+            padding: 0.7em 1.5em; 
+            margin: 0.5em 0; 
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background-color: #1a73e8;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        button:hover:not(:disabled) {
+            background-color: #155ab6;
+        }
+        button:disabled {
+            background-color: #d0d0d0;
+            cursor: not-allowed;
+        }
+        #reset-btn {
+            background-color: #6c757d; /* Neutral gray */
+            font-size: 0.9em;
+        }
+        #reset-btn:hover {
+            background-color: #c82333; /* Danger red */
+        }
+        strong.danger {
+            color: #d93025;
+        }
+        #qa-output strong {
+            display: block;
+            margin-top: 0.5em;
+            color: #1a73e8;
+        }
+        #qa-output strong:first-child {
+            margin-top: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>AI File Organizer</h1>
+            <button id="reset-btn">Reset Process</button>
+        </div>
+
+        <div id="step1-wrapper">
+            <h2>Step 1: Scan & Summarize Documents</h2>
+            <label for="base-path">Directory to Scan (Full Path):</label><br>
+            <input type="text" id="base-path" placeholder="e.g., C:\Users\YourUser\Documents\Unorganized"><br>
+            <button id="run-summary-btn">Run Scan & Summary</button>
+            <div id="summary-output" class="output">Scan status will appear here...</div>
+        </div>
+
+        <div id="step2-wrapper" style="display: none;">
+            <h2>Step 2: Analyze & Propose Organization</h2>
+            <button id="get-analysis-btn">Get AI Analysis</button>
+            <div id="analysis-output" class="output">AI analysis will appear here...</div>
+        </div>
+
+        <div id="step3-wrapper" style="display: none;">
+            <div id="qa-section">
+                <h2>Step 2.5 (Optional): Ask Questions</h2>
+                <label for="user-question">Your Question:</label><br>
+                <input type="text" id="user-question" placeholder="e.g., Why group these two files together?">
+                <button id="ask-btn">Ask</button>
+                <div id="qa-output" class="output">Q&A history will appear here...</div>
+            </div>
+
+            <h2>Step 3: Generate the Final Plan</h2>
+            <button id="generate-plan-btn">Generate Organization Plan</button>
+            <div id="plan-output" class="output">Plan and file tree will appear here...</div>
+        </div>
+        
+        <div id="step4-wrapper" style="display: none;">
+            <h2>Step 4: Execute Organization</h2>
+            <label for="destination-root">New Root Folder for Organized Files (Full Path):</label><br>
+            <input type="text" id="destination-root" placeholder="e.g., D:\OrganizedFiles"><br>
+            <button id="execute-plan-btn"><strong class="danger">Execute Plan (Move Files!)</strong></button>
+            <div id="execute-output" class="output">Execution status will appear here...</div>
+        </div>
+    </div>
+
+    <script>
+        // --- Get references to UI elements ---
+        const runSummaryBtn = document.getElementById('run-summary-btn');
+        const getAnalysisBtn = document.getElementById('get-analysis-btn');
+        const askBtn = document.getElementById('ask-btn');
+        const generatePlanBtn = document.getElementById('generate-plan-btn');
+        const executePlanBtn = document.getElementById('execute-plan-btn');
+        const resetBtn = document.getElementById('reset-btn'); // New reset button
+
+        // --- Get references to the step wrappers ---
+        const step2Wrapper = document.getElementById('step2-wrapper');
+        const step3Wrapper = document.getElementById('step3-wrapper');
+        const step4Wrapper = document.getElementById('step4-wrapper');
+
+        // --- UI Reset Function ---
+        function resetUI() {
+            // Hide all steps except the first one
+            step2Wrapper.style.display = 'none';
+            step3Wrapper.style.display = 'none';
+            step4Wrapper.style.display = 'none';
+
+            // Clear all input fields
+            document.getElementById('base-path').value = '';
+            document.getElementById('user-question').value = '';
+            document.getElementById('destination-root').value = '';
+
+            // Reset all output divs to their initial placeholder text
+            document.getElementById('summary-output').textContent = 'Scan status will appear here...';
+            document.getElementById('analysis-output').textContent = 'AI analysis will appear here...';
+            document.getElementById('qa-output').textContent = 'Q&A history will appear here...';
+            document.getElementById('plan-output').textContent = 'Plan and file tree will appear here...';
+            document.getElementById('execute-output').textContent = 'Execution status will appear here...';
+        }
+
+        // --- Event listener for the new Reset Button ---
+        resetBtn.addEventListener('click', async () => {
+            if (!confirm("Are you sure you want to reset the entire process? This will clear all progress and server data.")) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/reset', { method: 'POST' });
+                const result = await response.json();
+
+                if (result.status === 'success') {
+                    alert('Process has been reset successfully.');
+                    resetUI();
+                } else {
+                    alert(`Failed to reset server state: ${result.message}`);
+                }
+            } catch (error) {
+                alert(`An error occurred while trying to reset: ${error}`);
+                // Still reset the UI even if server fails, to allow user to restart
+                resetUI();
+            }
+        });
+
+        // --- Event listener for Step 1 ---
+        runSummaryBtn.addEventListener('click', async () => {
+            const basePath = document.getElementById('base-path').value;
+            if (!basePath) {
+                alert("Please provide a directory to scan.");
+                return;
+            }
+            const outputDiv = document.getElementById('summary-output');
+            outputDiv.textContent = 'Running summary generation... This may take a while depending on the number of files.';
+            
+            try {
+                const response = await fetch('/run_summary', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ base_path: basePath })
+                });
+                const result = await response.json();
+                outputDiv.textContent = JSON.stringify(result, null, 2);
+
+                if (!result.error) {
+                    step2Wrapper.style.display = 'block'; 
+                }
+            } catch (error) {
+                outputDiv.textContent = `An error occurred: ${error}`;
+            }
+        });
+
+        // --- Event listener for Step 2 ---
+        getAnalysisBtn.addEventListener('click', async () => {
+            const outputDiv = document.getElementById('analysis-output');
+            outputDiv.textContent = 'Asking AI to analyze the file structure...';
+
+            try {
+                const response = await fetch('/get_analysis', { method: 'POST' });
+                const result = await response.json();
+                outputDiv.textContent = result.analysis || JSON.stringify(result, null, 2);
+
+                if (!result.error) {
+                    step3Wrapper.style.display = 'block'; 
+                }
+            } catch (error) {
+                outputDiv.textContent = `An error occurred: ${error}`;
+            }
+        });
+
+        // --- Event listener for Step 2.5 (Q&A) ---
+        askBtn.addEventListener('click', async () => {
+            const questionInput = document.getElementById('user-question');
+            const question = questionInput.value.trim();
+            const qaOutputDiv = document.getElementById('qa-output');
+
+            if (!question) {
+                alert("Please type a question.");
+                return;
+            }
+
+            // Clear placeholder text on first question
+            if (qaOutputDiv.textContent === 'Q&A history will appear here...') {
+                qaOutputDiv.innerHTML = '';
+            }
+
+            qaOutputDiv.innerHTML += `<strong>You:</strong> ${question}<br>`;
+            qaOutputDiv.innerHTML += `<strong>AI:</strong> Thinking...`;
+            qaOutputDiv.scrollTop = qaOutputDiv.scrollHeight;
+
+            try {
+                const response = await fetch('/ask_question', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question: question })
+                });
+                const result = await response.json();
+                
+                qaOutputDiv.innerHTML = qaOutputDiv.innerHTML.replace(
+                    `<strong>AI:</strong> Thinking...`,
+                    `<strong>AI:</strong> ${result.answer || result.error}`
+                );
+            } catch (error) {
+                 qaOutputDiv.innerHTML = qaOutputDiv.innerHTML.replace(
+                    `<strong>AI:</strong> Thinking...`,
+                    `<strong>AI:</strong> An error occurred: ${error}`
+                );
+            }
+            
+            questionInput.value = '';
+            qaOutputDiv.scrollTop = qaOutputDiv.scrollHeight;
+        });
+
+        // --- Event listener for Step 3 ---
+        generatePlanBtn.addEventListener('click', async () => {
+            const outputDiv = document.getElementById('plan-output');
+            outputDiv.textContent = 'Generating final organization plan...';
+
+            try {
+                const response = await fetch('/generate_plan', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.error) {
+                    outputDiv.textContent = JSON.stringify(result, null, 2);
+                } else {
+                    outputDiv.textContent = `REASONING:\n${result.reasoning}\n\n----------\n\nFILE TREE:\n${result.file_tree}`;
+                    step4Wrapper.style.display = 'block';
+                }
+            } catch (error) {
+                outputDiv.textContent = `An error occurred: ${error}`;
+            }
+        });
+        
+        // --- Event listener for Step 4 ---
+        executePlanBtn.addEventListener('click', async () => {
+            const destinationRoot = document.getElementById('destination-root').value;
+            if (!destinationRoot) {
+                alert("Please provide a destination root folder.");
+                return;
+            }
+
+            if (!confirm("ARE YOU SURE?\n\nThis will physically move files on your computer from their original location to the new structure. This action cannot be easily undone.")) {
+                return;
+            }
+
+            const outputDiv = document.getElementById('execute-output');
+            outputDiv.textContent = 'Executing file move operation...';
+
+            try {
+                const response = await fetch('/execute_plan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ destination_root: destinationRoot })
+                });
+                const result = await response.json();
+                
+                if (result.log) {
+                    outputDiv.textContent = `${result.message}\n\n--- LOG ---\n${result.log.join('\n')}`;
+                } else {
+                    outputDiv.textContent = JSON.stringify(result, null, 2);
+                }
+            } catch (error) {
+                 outputDiv.textContent = `An error occurred: ${error}`;
+            }
+        });
+
+    </script>
+</body>
+</html>
