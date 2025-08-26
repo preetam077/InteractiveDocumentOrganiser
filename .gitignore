@@ -1,0 +1,23 @@
+# Environment variables
+.env
+
+# Python virtual environment
+venv/
+/venv/
+__pycache__/
+*.pyc
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Generated files from the application
+llm_input.json
+sessions.db
+
+# NLTK data (if downloaded locally)
+nltk_data/
+
+# Installation files
+*.egg-info/
