@@ -1,4 +1,4 @@
-# summarygenerator.py
+# summarygenerator.py (Upgraded with Caching Logic)
 
 import os
 import json
@@ -52,7 +52,7 @@ supported_extensions = {
     '.adoc', '.md', '.wav', '.mp3'
 }
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (Unchanged) ---
 
 def generate_summary(text: str, doc_embedding: np.ndarray, summary_lengths: list, cosine_similarities: list, max_sentences: int = 5, is_table: bool = False) -> str:
     if not text.strip():
@@ -96,41 +96,75 @@ def extract_excel_text(file_path: str) -> str:
         print(f"  -> Error reading Excel file {file_path} with pandas: {str(e)}")
         return ""
 
-# --- MAIN CALLABLE FUNCTION ---
+# --- MAIN CALLABLE FUNCTION (MODIFIED with Caching Logic) ---
 
 def run_summary_generation(base_path_str: str):
     """
-    Scans a directory, generates summaries, and saves the output.
+    Scans a directory, generates summaries for new files, and saves the combined output.
     Returns a dictionary containing a status message and KPI report.
     """
     base_path = Path(base_path_str)
     if not base_path.is_dir():
         return {"error": f"Provided path '{base_path_str}' is not a valid directory."}
 
+    llm_output_file = 'llm_input.json'
+    summary_cache = {}
+
+    # --- CHANGE #1: Load existing summaries from the JSON file into a cache ---
+    if os.path.exists(llm_output_file):
+        try:
+            with open(llm_output_file, 'r', encoding='utf-8') as f:
+                existing_list = json.load(f)
+                # Convert list of dicts to a dict keyed by file_path for fast lookups
+                summary_cache = {item['file_path']: item for item in existing_list}
+            print(f"Loaded {len(summary_cache)} existing summaries from cache.")
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Could not load or parse {llm_output_file}. Starting fresh. Error: {e}")
+            summary_cache = {}
+
     # KPI tracking variables
-    supported_files: List[str] = []
     processing_times: List[float] = []
     error_count: int = 0
-    successful_count: int = 0
+    newly_processed_count: int = 0
     summary_lengths: List[int] = []
     cosine_similarities: List[float] = []
-    output_files_success: List[str] = []
-    output_data: List[Dict] = []
-    llm_input_data: List[Dict] = []
 
-    # Step 1: Scan directory
-    print(f"Scanning {base_path} for documents...")
+    # Step 1: Scan directory to get a current list of all files on disk
+    print(f"Scanning {base_path} for all supported documents...")
+    files_on_disk = []
     for root, _, files in os.walk(base_path):
         for file in files:
             if os.path.splitext(file)[1].lower() in supported_extensions:
-                supported_files.append(os.path.join(root, file))
-
-    if not supported_files:
+                files_on_disk.append(os.path.join(root, file))
+    
+    if not files_on_disk:
         return {"message": "No supported documents found in the specified directory.", "kpi_report": {}}
 
-    # Step 2: Process documents
-    print(f"\nProcessing {len(supported_files)} supported documents...")
-    for file_path in supported_files:
+    # --- CHANGE #2: Prune cache and determine which files are new ---
+    # Remove entries from cache if the file was deleted from disk
+    existing_paths_on_disk = set(files_on_disk)
+    cached_paths = set(summary_cache.keys())
+    paths_to_remove = cached_paths - existing_paths_on_disk
+    if paths_to_remove:
+        print(f"\nPruning {len(paths_to_remove)} deleted file(s) from cache...")
+        for path in paths_to_remove:
+            del summary_cache[path]
+
+    # Determine which files need to be processed
+    files_to_process = [path for path in files_on_disk if path not in summary_cache]
+    skipped_files_count = len(files_on_disk) - len(files_to_process)
+
+    print(f"\nFound {len(files_on_disk)} total supported files.")
+    if skipped_files_count > 0:
+        print(f"---> Skipping {skipped_files_count} file(s) already in cache.")
+    if not files_to_process:
+        print("---> No new files to process.")
+    else:
+        print(f"---> Processing {len(files_to_process)} new file(s)...")
+
+
+    # Step 2: Process only the new documents
+    for file_path in files_to_process:
         start_time = time.time()
         try:
             print(f"Processing: {file_path}")
@@ -159,36 +193,38 @@ def run_summary_generation(base_path_str: str):
             else:
                 llm_dict['summary'] = "No content available for summary."
 
-            llm_input_data.append(llm_dict)
-            successful_count += 1
+            # --- CHANGE #3: Add the new result directly to the cache dictionary ---
+            summary_cache[file_path] = llm_dict
+            newly_processed_count += 1
         except Exception as e:
             print(f"Error processing {file_path}: {str(e)}")
             error_count += 1
         finally:
             processing_times.append(time.time() - start_time)
 
-    # Step 3: Save output for the LLM
-    llm_output_file = 'llm_input.json'
+    # Step 3: Save the updated, combined data for the LLM
+    # --- CHANGE #4: Convert cache dictionary back to list before saving ---
+    final_llm_input_data = list(summary_cache.values())
     try:
         with open(llm_output_file, 'w', encoding='utf-8') as f:
-            json.dump(llm_input_data, f, ensure_ascii=False, indent=4)
-        print(f"Output saved to {llm_output_file}")
-        output_files_success.append(llm_output_file)
+            json.dump(final_llm_input_data, f, ensure_ascii=False, indent=4)
+        print(f"\nOutput saved to {llm_output_file}. Total files in summary: {len(final_llm_input_data)}")
     except Exception as e:
         return {"error": f"Error saving {llm_output_file}: {str(e)}"}
 
     # Step 4: Prepare results to send back to the web UI
+    total_files_in_summary = len(final_llm_input_data)
     kpi_report = {
-        "document_processing_success_rate": (successful_count / len(supported_files) * 100) if supported_files else 0.0,
-        "average_processing_time_seconds": (sum(processing_times) / len(processing_times)) if processing_times else 0.0,
-        "error_rate": (error_count / len(supported_files) * 100) if supported_files else 0.0,
-        "files_found": len(supported_files),
-        "files_processed_successfully": successful_count,
-        "errors": error_count
+        "files_found_on_disk": len(files_on_disk),
+        "files_skipped_from_cache": skipped_files_count,
+        "files_newly_processed": newly_processed_count,
+        "total_files_in_summary": total_files_in_summary,
+        "errors_in_this_run": error_count,
+        "average_processing_time_for_new_files": (sum(processing_times) / len(processing_times)) if processing_times else 0.0
     }
     
     return {
-        "message": f"Processing complete. Successfully processed {successful_count} of {len(supported_files)} files.",
+        "message": f"Processing complete. Processed {newly_processed_count} new files. Total files in summary is now {total_files_in_summary}.",
         "kpi_report": kpi_report,
         "output_file": llm_output_file
     }

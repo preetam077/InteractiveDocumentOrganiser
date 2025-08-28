@@ -122,6 +122,7 @@ def reset_state():
     """Clears server-side state for the current user."""
     try:
         # CHANGE: Clear the session data for this user
+        session.pop('chat_history', None)
         session.clear()
         
         # Deleting the intermediate file can remain, as it's not user-specific

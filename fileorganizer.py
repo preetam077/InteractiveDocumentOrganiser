@@ -1,27 +1,30 @@
-# fileorganizer.py (Corrected Version)
+# fileorganizer.py (Final Version)
+# This script has been updated to exclusively use the client.models.generate_content pattern
+# and includes the fix for the tool-calling error.
 
 import json
 import os
 import shutil
-import google.generativeai as genai  # Use the standard import
+from google import genai
 from dotenv import load_dotenv
 from pathlib import Path
+from google.genai import types # Required for GenerateContentConfig
+from flask import session
 
 # --- ONE-TIME SETUP ---
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# --- CHANGE #1: Switch from genai.Client to genai.configure ---
-# This is the modern and correct way to initialize the library.
+# Initialize the client as requested.
 try:
     if not GOOGLE_API_KEY:
         raise ValueError("Error: GOOGLE_API_KEY environment variable is not set.")
-    genai.configure(api_key=GOOGLE_API_KEY)
+    client = genai.Client(api_key=GOOGLE_API_KEY)
 except Exception as e:
     print(f"CRITICAL ERROR initializing Google GenAI: {e}")
-    # We will handle the uninitialized state within each function.
+    client = None # Ensure client is None if initialization fails
 
-# --- HELPER FUNCTIONS (unchanged) ---
+# --- HELPER FUNCTIONS (UNCHANGED) ---
 
 def load_document_data(filepath='llm_input.json'):
     try:
@@ -38,14 +41,15 @@ def create_file_path_map(document_data):
         path_map[filename] = doc['file_path']
     return path_map
 
-# --- NEW TOOL FUNCTION (unchanged) ---
-
 def search_documents(all_docs: list, query: str):
     """
     Searches document summaries for a specific query string.
     Only returns documents where the query is found in the summary.
     """
-    print(f"\n---> TOOL EXECUTED: Searching for documents containing '{query}'...")
+    # ADD THIS LINE FOR DEBUGGING: See the exact query the AI is using.
+    print(f"\n---> AI generated query: '{query}'")
+    
+    print(f"---> TOOL EXECUTED: Searching for documents containing '{query}'...")
     if not all_docs:
         return {"error": "Document data is not available for search."}
     matches = []
@@ -56,11 +60,11 @@ def search_documents(all_docs: list, query: str):
     return {"found_documents": matches}
 
 
-# --- MAIN CALLABLE FUNCTIONS (Updated) ---
+# --- MAIN CALLABLE FUNCTIONS (UPDATED) ---
 
 def get_initial_analysis():
     """Loads data from llm_input.json and gets the initial AI analysis."""
-    if not GOOGLE_API_KEY:
+    if not client:
         return {"error": "Google GenAI is not initialized. Check API key."}
         
     all_docs = load_document_data()
@@ -72,114 +76,135 @@ def get_initial_analysis():
         for doc in all_docs
     ])
     prompt = f"""
-    You are an expert file organization assistant. Your task is to analyze the current file structure based on the provided file paths, types, and summaries, explain why the existing placement and structure may not be the best optimized, and convince the user that a new organization would be beneficial.
+    You are an expert file organization assistant. Your task is to analyze the current file structure based on the provided file paths, types, and summaries, and explain why the existing structure may not be optimal.
 
     **File Information:**
     {documents_str}
 
     **Instructions:**
     Respond ONLY with a concise analysis (200-400 words) that includes:
-    - A description of the current structure (e.g., how files are grouped, any patterns in directories).
-    - Why it may not be optimal (e.g., scattered files, lack of logical grouping by project/year/topic, redundancy, difficulty in navigation).
-    - Suggestions for improvement (high-level, without providing the full plan yet).
-    - A convincing argument on the benefits of reorganizing (e.g., easier access, better scalability, reduced search time).
+    - A description of the current structure.
+    - Why it may not be optimal (e.g., scattered files, lack of logical grouping).
+    - Suggestions for improvement (high-level).
+    - A convincing argument on the benefits of reorganizing.
 
-    Do not provide a JSON plan, file tree, or any reorganization details yet. Focus on analysis and persuasion.
+    Do not provide a JSON plan or file tree yet. Focus on analysis and persuasion.
     """
     try:
-        # --- CHANGE #2: Initialize model and call generate_content ---
-        model = genai.GenerativeModel('gemini-2.5-flash-lite')
-        response = model.generate_content(prompt)
+        model_name = 'gemini-2.5-flash-lite' # Using a reliable current model
+        response = client.models.generate_content(
+            model=model_name, contents=prompt
+        )
         analysis_text = response.text.strip()
         return {"analysis": analysis_text, "all_docs": all_docs}
     except Exception as e:
         return {"error": f"Failed to get analysis from AI: {e}"}
 
-# Replace the existing answer_a_question function with this final, most compatible version.
+# client = ... (your initialized Google GenAI client)
+# from google.generativeai import types # Make sure this is imported
 
 def answer_a_question(question: str, all_docs: list, current_analysis: str):
-    """Answers a user question using the scalable tool-use approach."""
-    if not GOOGLE_API_KEY:
+    """
+    Answers a user question using an advanced two-call 'search then reason' approach.
+    1. First call to the AI decides if a search is needed and generates a BROAD query.
+    2. The tool runs a simple keyword search.
+    3. Second call to the AI intelligently filters the results to give a precise answer.
+    """
+    if not client:
         return {"error": "Google GenAI is not initialized."}
 
+    # This is the tool the AI will be able to call.
+    # Its docstring is crucial for the AI to understand how to use it.
+    def search_for_document_info(query: str):
+        """
+        Performs a broad keyword search to get a list of potentially relevant documents.
+        This tool is the FIRST STEP. It retrieves documents based on keywords only.
+        The final filtering and comparison (e.g., for numbers, dates) must be done
+        by you, the assistant, after this tool returns its results.
+        For example, for 'resumes with less than 7 years experience', a good query
+        is simply 'experience'.
+        """
+        # This calls your actual search tool function
+        return search_documents(all_docs=all_docs, query=query)
+
     try:
-        # Step 1: Initialize the model WITH the tool definition
-        # The library inspects the function to create the schema.
-        model = genai.GenerativeModel(
-            model_name='gemini-1.5-flash-latest',
-            tools=[search_documents]
-        )
+        model_name = 'gemini-2.5-flash-lite' # Per your instructions
+
+        # --- PROMPT 1: For Router Logic and Broad Query Generation ---
+        # This prompt instructs the model to either answer from context or
+        # create a SIMPLE keyword query suitable for our "dumb" tool.
+        prompt_1_search_generation = f"""
+        You are a highly advanced file assistant. Your goal is to answer the user's question about a set of documents based on the context provided with their question.
+
+        **Core Directive: You must operate autonomously. Follow the entire two-stage process below without pausing to ask the user for permission to proceed. Your only output should be the final answer.**
+        **Your Reasoning Process is a mandatory two-stage process:**
+
+        **Stage 1: Broad Document Retrieval**
+        1.  **Analyze:** First, analyze the user's question and the "Context from Initial Analysis" below.
+        2.  **Decide:**
+            - If the question is general and can be answered from the context, answer it directly.
+            - If the question requires finding specific documents, you MUST use the `search_for_document_info` tool. The tool is a simple keyword search. Simplify the user's request to a single, broad keyword (e.g., for 'resumes with >5 years experience', the query is 'experience'; for 'performance docs after 2020', the query is 'performance').
         
-        # The generic prompt remains the same.
-        prompt = f"""
-        You are an expert file assistant. Your primary function is to answer questions about a collection of documents based on their summaries.
+        **Stage 2: Precise Filtering and Answering**
+        3.  **Filter & Synthesize (CRUCIAL):** This is your most important task.After you get the search results from the tool, you must act as an intelligent filter. Meticulously review the results and compare them against the user's **original, specific request**. Perform necessary comparisons (e.g., checking if '8 years' is 'more than 5 years').
+        4.  **Answer:** Based on your filtered list, provide a direct and concise answer. List the file paths of the matching documents. If no documents match after your filtering, state that.
 
-        **Your ONLY way to access the specific content of these document summaries is by using the `search_documents` tool.** You cannot see the files directly.
-
-        **CRITICAL INSTRUCTION:** To answer any user question that requires looking for specific information inside the documents (such as names, topics, ingredients, skills, etc.), you MUST call the `search_documents` function with a relevant keyword.
-        
-        **Example of how to think:** If your analysis indicates the documents are recipes and the user asks 'what dishes use garlic?', a good query for the tool would be 'garlic'. If the analysis suggests they are resumes and the user asks for 'who is a manager?', a good query would be 'manager'.
-
-        You have already performed a high-level analysis of all the documents. Use this analysis to understand the general context and topic of the document collection:
-        **Your Previous Analysis:**
+        **Context from Initial Analysis:**
         "{current_analysis}"
-
-        Now, answer the user's question based on these instructions.
-        **User's Question:**
-        "{question}"
         """
 
-        # --- CHANGE: We now use model.generate_content directly instead of a chat session ---
-        print("--- Sending question to model to decide on tool use...")
-        response = model.generate_content(prompt, tools=[search_documents])
+        # --- CALL 1: Decide whether to search and get the broad query ---
+
+        chat_history_dicts = session.get('chat_history', [])
         
-        response_part = response.candidates[0].content.parts[0]
-        if not hasattr(response_part, 'function_call'):
-            print("--- Model answered directly without tool.")
-            return {"answer": response.text.strip()}
+        if not chat_history_dicts:
+            chat_history_dicts.append({'role': 'user', 'parts': [{'text': prompt_1_search_generation.strip()}]})
+            chat_history_dicts.append({'role': 'model', 'parts': [{"text":"Understood. I am ready to answer questions."}]})
 
-        function_call = response_part.function_call
-        print(f"--- Model wants to call tool: {function_call.name}")
+        print(f"Restored chat history with {len(chat_history_dicts)} entries.")
 
-        if function_call.name == "search_documents":
-            query = function_call.args.get("query")
-            tool_result = search_documents(all_docs=all_docs, query=query)
+        # Convert history from dicts to 'Content' objects for the API
+        chat_history = [types.Content(**item) for item in chat_history_dicts]
 
-            # --- CHANGE: Manually construct the conversation history for the second call ---
-            # This is the most stable way to handle the conversation, avoiding helper classes.
-            conversation_history = [
-                {"role": "user", "parts": [{"text": prompt}]},
-                {"role": "model", "parts": [response_part]},
-                {
-                    "role": "function",
-                    "parts": [
-                        {
-                            "function_response": {
-                                "name": function_call.name,
-                                "response": tool_result
-                            }
-                        }
-                    ]
-                }
-            ]
+        print(f"---> Sending to AI (Call 1) with {len(chat_history)} history entries...")
 
-            print("--- Sending tool result back to model for final answer...")
-            final_response = model.generate_content(
-                conversation_history,
-                tools=[search_documents]
+        chat = client.chats.create(
+            model=model_name,
+            history=chat_history,
+            config=types.GenerateContentConfig(system_instruction=prompt_1_search_generation,
+                                               tools=[search_for_document_info],)
             )
-            return {"answer": final_response.text.strip()}
-        else:
-            return {"error": f"Model tried to call an unknown function: {function_call.name}"}
+        response = chat.send_message(question)
+
+        def content_to_dict(content):
+            """Convert a single Content object to a dictionary for JSON serialization."""
+            parts = []
+            for part in content.parts:
+                part_dict = {}
+                # Handle text content
+                if part.text is not None:
+                    part_dict["text"] = part.text
+                # Add other fields as needed (e.g., blob data, inline_data)
+                if part_dict:  # Only add non-empty part dictionaries
+                    parts.append(part_dict)
+            return {
+                "role": content.role,
+                "parts": parts
+            }
+
+        updated_history_dicts = [content_to_dict(content) for content in chat.get_history()]
+        session['chat_history'] = updated_history_dicts
+
+        return {"answer": response.text}
 
     except Exception as e:
         print(f"An exception occurred in answer_a_question: {e}")
-        return {"error": f"Failed to get an answer from the AI: {e}"}
+        return {"error": f"Failed to get an answer from the AI: {str(e)}"}
 
 
 def get_organization_plan(all_docs, current_analysis):
     """Gets the file organization plan, tree, and reasoning from the AI."""
-    if not GOOGLE_API_KEY:
+    if not client:
         return {"error": "Google GenAI is not initialized."}
         
     documents_str = "\n".join([
@@ -187,57 +212,41 @@ def get_organization_plan(all_docs, current_analysis):
         for doc in all_docs
     ])
     prompt = f"""
-    You are an expert file organization assistant. Based on the following analysis of the current file structure, your task is to organize the files listed below into a logical folder structure and provide a JSON plan, an ASCII file tree representation, and a reasoning section explaining the organization.
+    You are an expert file organization assistant. Based on the following analysis, your task is to organize the files into a logical folder structure and provide a JSON plan, an ASCII file tree, and your reasoning.DO NOT CHANGE THE NAME OF FILES
 
-    **Previous Analysis of Current Structure:**
+    **Previous Analysis:**
     {current_analysis}
 
     **File Information:**
     {documents_str}
 
     **Instructions:**
-    Respond ONLY with a single output containing three sections, separated clearly. Do not include any additional text, explanations, or markdown formatting outside the specified structure. DO NOT CHANGE THE NAME OF FILES; KEEP THEM AS THEY ARE.
-
-    1. **JSON Plan**:
-       - A JSON object where each key is the proposed new directory path (e.g., "Case_Studies/2020_Grimmen_Vegetation").
-       - Each value is a list of filenames (e.g., ["Case Study_Cutting Vegetation_2020.docx", "Fassade nach Cutting.png"]) to be moved into that directory.
-       - Use forward slashes (/) for directory paths.
-
-    2. **ASCII File Tree**:
-       - After the JSON, include a line with exactly "-----" to separate sections.
-       - Provide an ASCII file tree representation of the same structure.
-
-    3. **Reasoning**:
-       - After the file tree, include another line with exactly "-----" to separate sections.
-       - Provide a concise explanation (100-200 words) of why this organization plan was chosen.
+    Respond ONLY with a single output containing three clearly separated sections (JSON, file tree, reasoning). DO NOT CHANGE THE FILENAMES IN ANY CASE.
 
     **Output Format**:
     ```json
     {{
-      "Case_Studies/2018_Cadolzburg": [
-        "Case Study_Cadolzburg_v1.docx",
-        "ZAE_Modulliste.pdf"
-      ]
+      "Project_A/Source_Code": ["main.py", "utils.py"]
     }}
     -----
-    Case_Studies/
-    └── 2018_Cadolzburg/
-        ├── Case Study_Cadolzburg_v1.docx
-        └── ZAE_Modulliste.pdf
+    Project_A/
+    └── Source_Code/
+        ├── main.py
+        └── utils.py
     -----
-    The files are organized by project and year...
+    The reasoning for this structure is...
     ```
-
-    Ensure all files from the input are included in both the JSON and the file tree.
     """
     try:
-        # --- CHANGE #4: Update this function as well ---
-        model = genai.GenerativeModel('gemini-2.5-flash-lite')
-        response = model.generate_content(prompt)
+        # Using a model better suited for complex reasoning and formatting.
+        model_name = 'gemini-2.5-flash-lite'
+        response = client.models.generate_content(
+            model=model_name, contents=prompt
+        )
         response_text = response.text.strip().replace('```json', '').replace('```', '')
         parts = response_text.split('-----', 2)
         if len(parts) != 3:
-            raise ValueError("Invalid response format from AI.")
+            raise ValueError("Invalid response format from AI. Could not split into 3 parts.")
         
         json_part, file_tree, reasoning = [part.strip() for part in parts]
         plan = json.loads(json_part)
@@ -247,37 +256,42 @@ def get_organization_plan(all_docs, current_analysis):
 
 
 def execute_the_plan(plan, all_docs, destination_root_str):
-    # This function does not call the AI, so it remains unchanged.
+    """Executes the file moving plan. Does not call the AI."""
     destination_root = Path(destination_root_str)
     if not destination_root.is_dir():
         try:
             os.makedirs(destination_root)
         except Exception as e:
             return {"error": f"Destination root '{destination_root_str}' does not exist and could not be created: {e}"}
+            
     file_path_map = create_file_path_map(all_docs)
     log = []
     files_moved = 0
     errors_encountered = 0
+    
     for directory, filenames in plan.items():
         new_dir_path = destination_root / Path(directory)
         try:
             os.makedirs(new_dir_path, exist_ok=True)
             log.append(f"[OK] Ensured directory exists: '{new_dir_path}'")
         except OSError as e:
-            log.append(f"[ERROR] Could not create directory '{new_dir_path}'. Skipping. Error: {e}")
+            log.append(f"[ERROR] Could not create directory '{new_dir_path}'. Error: {e}")
             errors_encountered += 1
             continue
+            
         for filename in filenames:
             original_path_str = file_path_map.get(filename)
             if not original_path_str:
                 log.append(f"  [WARN] Could not find original path for '{filename}'. Skipping.")
                 errors_encountered += 1
                 continue
+                
             original_path = Path(original_path_str)
             if not original_path.exists():
                 log.append(f"  [WARN] Source file does not exist at '{original_path}'. Skipping.")
                 errors_encountered += 1
                 continue
+                
             destination_path = new_dir_path / filename
             try:
                 shutil.move(original_path, destination_path)
@@ -286,10 +300,8 @@ def execute_the_plan(plan, all_docs, destination_root_str):
             except Exception as e:
                 log.append(f"  [ERROR] Failed to move '{filename}'. Error: {e}")
                 errors_encountered += 1
+                
     total_files_in_plan = sum(len(f) for f in plan.values())
     summary = f"Execution complete. Moved {files_moved}/{total_files_in_plan} files. Encountered {errors_encountered} errors."
 
     return {"message": summary, "log": log}
-
-
-
