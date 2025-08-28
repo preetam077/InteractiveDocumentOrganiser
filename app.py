@@ -41,10 +41,15 @@ def run_summary():
     data = request.get_json()
     base_path = data.get('base_path')
     
+    try:
+        max_workers = int(data.get('max_workers', 4))
+    except (ValueError, TypeError):
+        max_workers = 4
+
     if not base_path:
         return jsonify({"error": "BASE_PATH is required."}), 400
         
-    results = run_summary_generation(base_path)
+    results = run_summary_generation(base_path, max_workers=max_workers)
     return jsonify(results)
 
 @app.route('/get_analysis', methods=['POST'])

@@ -1,8 +1,8 @@
-# summarygenerator.py (Upgraded with Caching Logic)
+# summarygenerator.py (Upgraded with Threading)
 
 import os
 import json
-from typing import List, Dict
+from typing import List, Dict, Tuple, Any
 import pandas as pd
 from docling.document_converter import DocumentConverter
 from docling_core.types.doc import DoclingDocument
@@ -15,10 +15,9 @@ import warnings
 from torch.utils.data import dataloader
 import time
 from pathlib import Path
+import concurrent.futures # --- NEW ---
 
-# --- ONE-TIME SETUP (runs when the server starts) ---
-
-# Filter warnings
+# --- ONE-TIME SETUP (Unchanged) ---
 warnings.filterwarnings(
     "ignore",
     message="^Data Validation extension is not supported and will be removed$",
@@ -30,21 +29,14 @@ warnings.filterwarnings("ignore",
     category=UserWarning,
     module=dataloader.__name__
 )
-
-# Download NLTK data
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
     print("Downloading NLTK punkt resource...")
     nltk.download('punkt')
 
-# Load embedding model once
-print("Loading sentence transformer model...")
-embed_model = SentenceTransformer('all-MiniLM-L6-v2')
-print("Model loaded.")
-
-# Initialize document converter once
-converter = DocumentConverter()
+embed_model = None
+converter = None
 
 supported_extensions = {
     '.pdf', '.docx', '.pptx', '.xlsx', '.html',
@@ -53,32 +45,33 @@ supported_extensions = {
 }
 
 # --- HELPER FUNCTIONS (Unchanged) ---
-
 def generate_summary(text: str, doc_embedding: np.ndarray, summary_lengths: list, cosine_similarities: list, max_sentences: int = 5, is_table: bool = False) -> str:
+    # This function is being modified to be self-contained for threading
+    # It now returns the summary and also the new lengths/similarities it generated
     if not text.strip():
-        return "No content available for summary."
+        return "No content available for summary.", 0, []
     try:
         if is_table:
             lines = [line.strip() for line in text.split('\n') if line.strip()]
-            if not lines: return "No meaningful text content extracted from table."
+            if not lines: return "No meaningful text content extracted from table.", 0, []
             summary_lines = lines[:max_sentences]
             summary = f"Table summary: {'; '.join(summary_lines)}..."
-            summary_lengths.append(len(summary.split()))
-            return summary
+            summary_len = len(summary.split())
+            return summary, summary_len, []
         else:
             sentences = sent_tokenize(text)
-            if not sentences: return "No sentences detected for summary."
+            if not sentences: return "No sentences detected for summary.", 0, []
             sentence_embeddings = embed_model.encode(sentences)
             similarities = cosine_similarity([doc_embedding], sentence_embeddings)[0]
-            cosine_similarities.extend(similarities.tolist())
             top_indices = np.argsort(similarities)[-max_sentences:]
             top_sentences = [sentences[i] for i in sorted(top_indices) if similarities[i] > 0.1]
             summary = " ".join(top_sentences)
-            summary_lengths.append(len(summary.split()))
-            return summary if summary else "Unable to generate summary due to low similarity."
+            summary_len = len(summary.split())
+            final_summary = summary if summary else "Unable to generate summary due to low similarity."
+            return final_summary, summary_len, similarities.tolist()
     except Exception as e:
         print(f"  -> Error generating summary: {str(e)}")
-        return "Summary generation failed."
+        return "Summary generation failed.", 0, []
 
 def extract_excel_text(file_path: str) -> str:
     try:
@@ -96,13 +89,79 @@ def extract_excel_text(file_path: str) -> str:
         print(f"  -> Error reading Excel file {file_path} with pandas: {str(e)}")
         return ""
 
-# --- MAIN CALLABLE FUNCTION (MODIFIED with Caching Logic) ---
-
-def run_summary_generation(base_path_str: str):
+# --- NEW: WORKER FUNCTION FOR A SINGLE FILE ---
+def process_single_file(file_path: str) -> Dict[str, Any]:
     """
-    Scans a directory, generates summaries for new files, and saves the combined output.
+    This function contains all the logic to process one file.
+    It's designed to be run in a separate thread.
+    It returns a dictionary with the results for thread-safe collection.
+    """
+    global embed_model, converter
+    if embed_model is None:
+        print(f"Initializing models in process ID: {os.getpid()}")
+        embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+        converter = DocumentConverter()
+        print(f"Models loaded for process ID: {os.getpid()}")
+
+    start_time = time.time()
+    try:
+        print(f"Processing: {file_path} in process {os.getpid()}")
+        ext = os.path.splitext(file_path)[1].lower()
+        llm_dict: Dict = {'file_path': file_path, 'type': ext, 'summary': ""}
+        
+        full_text = ""
+        if ext == '.xlsx':
+            full_text = extract_excel_text(file_path)
+        else:
+            conv_res = converter.convert(file_path)
+            if conv_res.document:
+                doc: DoclingDocument = conv_res.document
+                text_parts = [item.text for item in doc.texts if item.text]
+                for table in doc.tables:
+                    for row in table.data:
+                        for cell in row:
+                            cell_text = getattr(cell, 'text', str(cell)) if not isinstance(cell, str) else cell
+                            if cell_text: text_parts.append(cell_text)
+                full_text = "\n".join(text_parts).strip()
+        
+        summary_len = 0
+        similarities = []
+        if full_text:
+            doc_embedding = embed_model.encode(full_text)
+            # Dummy lists that won't be used, as we capture the return values
+            summary, summary_len, similarities = generate_summary(
+                full_text, doc_embedding, [], [], is_table=(ext == '.xlsx')
+            )
+            llm_dict['summary'] = summary
+        else:
+            llm_dict['summary'] = "No content available for summary."
+
+        return {
+            "status": "success",
+            "data": llm_dict,
+            "processing_time": time.time() - start_time,
+            "summary_length": summary_len,
+            "cosine_similarities": similarities
+        }
+    except Exception as e:
+        print(f"Error processing {file_path}: {str(e)}")
+        return {
+            "status": "error",
+            "file_path": file_path,
+            "error_message": str(e),
+            "processing_time": time.time() - start_time
+        }
+
+# --- MAIN CALLABLE FUNCTION (MODIFIED with Threading) ---
+def run_summary_generation(base_path_str: str, max_workers: int = None): # Added max_workers parameter
+    """
+    Scans a directory, generates summaries for new files using multiple threads, and saves the output.
     Returns a dictionary containing a status message and KPI report.
     """
+    if max_workers is None:
+        max_workers = os.cpu_count() or 4
+        print(f"--- Auto-detected {max_workers} CPU cores to use as workers. ---")
+        
     base_path = Path(base_path_str)
     if not base_path.is_dir():
         return {"error": f"Provided path '{base_path_str}' is not a valid directory."}
@@ -110,12 +169,10 @@ def run_summary_generation(base_path_str: str):
     llm_output_file = 'llm_input.json'
     summary_cache = {}
 
-    # --- CHANGE #1: Load existing summaries from the JSON file into a cache ---
     if os.path.exists(llm_output_file):
         try:
             with open(llm_output_file, 'r', encoding='utf-8') as f:
                 existing_list = json.load(f)
-                # Convert list of dicts to a dict keyed by file_path for fast lookups
                 summary_cache = {item['file_path']: item for item in existing_list}
             print(f"Loaded {len(summary_cache)} existing summaries from cache.")
         except (json.JSONDecodeError, IOError) as e:
@@ -129,19 +186,12 @@ def run_summary_generation(base_path_str: str):
     summary_lengths: List[int] = []
     cosine_similarities: List[float] = []
 
-    # Step 1: Scan directory to get a current list of all files on disk
+    # Step 1: Scan and determine files to process (Unchanged logic)
     print(f"Scanning {base_path} for all supported documents...")
-    files_on_disk = []
-    for root, _, files in os.walk(base_path):
-        for file in files:
-            if os.path.splitext(file)[1].lower() in supported_extensions:
-                files_on_disk.append(os.path.join(root, file))
-    
+    files_on_disk = [os.path.join(root, file) for root, _, files in os.walk(base_path) for file in files if os.path.splitext(file)[1].lower() in supported_extensions]
     if not files_on_disk:
         return {"message": "No supported documents found in the specified directory.", "kpi_report": {}}
-
-    # --- CHANGE #2: Prune cache and determine which files are new ---
-    # Remove entries from cache if the file was deleted from disk
+    
     existing_paths_on_disk = set(files_on_disk)
     cached_paths = set(summary_cache.keys())
     paths_to_remove = cached_paths - existing_paths_on_disk
@@ -149,8 +199,7 @@ def run_summary_generation(base_path_str: str):
         print(f"\nPruning {len(paths_to_remove)} deleted file(s) from cache...")
         for path in paths_to_remove:
             del summary_cache[path]
-
-    # Determine which files need to be processed
+    
     files_to_process = [path for path in files_on_disk if path not in summary_cache]
     skipped_files_count = len(files_on_disk) - len(files_to_process)
 
@@ -160,50 +209,31 @@ def run_summary_generation(base_path_str: str):
     if not files_to_process:
         print("---> No new files to process.")
     else:
-        print(f"---> Processing {len(files_to_process)} new file(s)...")
+        print(f"---> Processing {len(files_to_process)} new file(s) using up to {max_workers} threads...")
 
-
-    # Step 2: Process only the new documents
-    for file_path in files_to_process:
-        start_time = time.time()
-        try:
-            print(f"Processing: {file_path}")
-            ext = os.path.splitext(file_path)[1].lower()
-            llm_dict: Dict = {'file_path': file_path, 'type': ext, 'summary': ""}
+    # --- MODIFIED: Process new documents using a ProcessPoolExecutor ---
+    if files_to_process:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all file processing tasks to the executor
+            future_to_file = {executor.submit(process_single_file, file_path): file_path for file_path in files_to_process}
             
-            full_text = ""
-            if ext == '.xlsx':
-                full_text = extract_excel_text(file_path)
-            else:
-                conv_res = converter.convert(file_path)
-                if conv_res.document:
-                    doc: DoclingDocument = conv_res.document
-                    text_parts = [item.text for item in doc.texts if item.text]
-                    for table in doc.tables:
-                        for row in table.data:
-                            for cell in row:
-                                cell_text = getattr(cell, 'text', str(cell)) if not isinstance(cell, str) else cell
-                                if cell_text: text_parts.append(cell_text)
-                    full_text = "\n".join(text_parts).strip()
-            
-            if full_text:
-                doc_embedding = embed_model.encode(full_text)
-                summary = generate_summary(full_text, doc_embedding, summary_lengths, cosine_similarities, is_table=(ext == '.xlsx'))
-                llm_dict['summary'] = summary
-            else:
-                llm_dict['summary'] = "No content available for summary."
-
-            # --- CHANGE #3: Add the new result directly to the cache dictionary ---
-            summary_cache[file_path] = llm_dict
-            newly_processed_count += 1
-        except Exception as e:
-            print(f"Error processing {file_path}: {str(e)}")
-            error_count += 1
-        finally:
-            processing_times.append(time.time() - start_time)
-
-    # Step 3: Save the updated, combined data for the LLM
-    # --- CHANGE #4: Convert cache dictionary back to list before saving ---
+            # Process results as they are completed
+            for future in concurrent.futures.as_completed(future_to_file):
+                result = future.result()
+                
+                # This part is now thread-safe because we are processing results one by one in the main thread
+                processing_times.append(result["processing_time"])
+                
+                if result["status"] == "success":
+                    llm_dict = result["data"]
+                    summary_cache[llm_dict['file_path']] = llm_dict
+                    summary_lengths.append(result["summary_length"])
+                    cosine_similarities.extend(result["cosine_similarities"])
+                    newly_processed_count += 1
+                else: # status == "error"
+                    error_count += 1
+    
+    # --- Step 3 & 4: Saving and Reporting (Unchanged Logic) ---
     final_llm_input_data = list(summary_cache.values())
     try:
         with open(llm_output_file, 'w', encoding='utf-8') as f:
@@ -212,7 +242,6 @@ def run_summary_generation(base_path_str: str):
     except Exception as e:
         return {"error": f"Error saving {llm_output_file}: {str(e)}"}
 
-    # Step 4: Prepare results to send back to the web UI
     total_files_in_summary = len(final_llm_input_data)
     kpi_report = {
         "files_found_on_disk": len(files_on_disk),

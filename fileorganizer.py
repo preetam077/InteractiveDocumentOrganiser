@@ -136,13 +136,15 @@ def answer_a_question(question: str, all_docs: list, current_analysis: str):
         prompt_1_search_generation = f"""
         You are a highly advanced file assistant. Your goal is to answer the user's question about a set of documents based on the context provided with their question.
 
-        **Core Directive: You must operate autonomously. Follow the entire process below without pausing to ask the user for permission to proceed. Your only output should be the final answer.**
+        **Core Directive: You must operate autonomously. Follow the entire process below without pausing to ask the user for permission to proceed. Your only output should be the final answer **to the user's most recent message only**. Do not act on previous messages in the history unless the new message is a direct follow-up to them.**
         **Your Reasoning Process is a mandatory two-stage process:**
 
         **Stage 1: Analyze User Intent and Decide Action**
         1.  **Analyze User Intent:** Carefully examine the user's latest message in the context of the entire conversation. Determine the user's primary intent by choosing one of the following two categories:
             A. **New Search Request:**  The user wants to find documents they have not asked for before. This usually involves new topics, keywords, or criteria (e.g., "Find me files about marketing," "Get all resumes with Python experience," "now show me documents about finance").
             B. **Conversational Follow-up:** The user is asking a question, making a statement, or offering a correction about the documents you presented in your immediately preceding response (e.g., "Tell me more about the second file," "Which of these is most recent?", "I think that first document is incorrect.").
+            C. **General Conversation:** The user is not asking about documents (e.g., "hello", "how are you?", "what is your name?"). Then just answer conversationally and do not use the tool.
+
         2.  **Decide on an Action:**
             - If the intent is a New Search Request (A): You MUST use the `search_for_document_info` tool to find a new list of documents. Simplify the user's request to a single, broad keyword for the tool (e.g., for 'resumes with >5 years experience', the query is 'experience').
             - If the intent is a Conversational Follow-up (B): You MUST NOT use the search tool again. You will answer using only the information (file paths and summaries) you already have from the previous turn.
@@ -163,9 +165,9 @@ def answer_a_question(question: str, all_docs: list, current_analysis: str):
 
         chat_history_dicts = session.get('chat_history', [])
         
-        if not chat_history_dicts:
-            chat_history_dicts.append({'role': 'user', 'parts': [{'text': prompt_1_search_generation.strip()}]})
-            chat_history_dicts.append({'role': 'model', 'parts': [{"text":"Understood. I am ready to answer questions."}]})
+        # if not chat_history_dicts:
+        #     chat_history_dicts.append({'role': 'user', 'parts': [{'text': prompt_1_search_generation.strip()}]})
+        #     chat_history_dicts.append({'role': 'model', 'parts': [{"text":"Understood. I am ready to answer questions."}]})
 
         print(f"Restored chat history with {len(chat_history_dicts)} entries.")
 
