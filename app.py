@@ -120,6 +120,17 @@ def execute_plan():
         return jsonify({"error": "Organization plan not generated yet."}), 400
         
     results = fileorganizer.execute_the_plan(plan, all_docs, destination_root)
+
+    # After a successful execution with no errors, delete the summary file.
+    if 'error' not in results and results.get('errors_encountered') == 0:
+        if os.path.exists('llm_input.json'):
+            try:
+                os.remove('llm_input.json')
+                print("Successfully removed llm_input.json after successful plan execution.")
+            except OSError as e:
+                # Log the error, but don't fail the request. The user's files were moved.
+                print(f"Error removing llm_input.json after execution: {e}")
+
     return jsonify(results)
 
 @app.route('/reset', methods=['POST'])

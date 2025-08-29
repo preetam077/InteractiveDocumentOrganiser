@@ -136,7 +136,7 @@ def answer_a_question(question: str, all_docs: list, current_analysis: str):
         prompt_1_search_generation = f"""
         You are a highly advanced file assistant. Your goal is to answer the user's question about a set of documents based on the context provided with their question.
 
-        **Core Directive: You must operate autonomously. Follow the entire process below without pausing to ask the user for permission to proceed. Your only output should be the final answer **to the user's most recent message only**. Do not act on previous messages in the history unless the new message is a direct follow-up to them.**
+        **Core Directive: You must operate autonomously. Follow the entire process below without pausing to ask the user for permission to proceed. Your only output should be the final answer **to the user's most recent message only**. Do not act on previous messages in the history unless the new message is a direct follow-up to them. NEVER ASK THE USER FOR PERMISSION TO PROCEED. Your final output must NEVER contain a question. You provide answers, not questions.**
         **Your Reasoning Process is a mandatory two-stage process:**
 
         **Stage 1: Analyze User Intent and Decide Action**
@@ -232,6 +232,8 @@ def get_organization_plan(all_docs, current_analysis):
     **Instructions:**
     Respond ONLY with a single output containing three sections, separated clearly. Do not include any additional text, explanations, or markdown formatting outside the specified structure. DO NOT CHANGE THE NAME OF FILES; KEEP THEM AS THEY ARE.
 
+    **CRITICAL RULE: Each file must be assigned to exactly ONE directory. You are forbidden from listing the same file in multiple locations. If a file seems to fit in more than one folder, place it in the most specific or primary category.**
+    
     1. **JSON Plan**:
        - A JSON object where each key is the proposed new directory path (e.g., "Case_Studies/2020_Grimmen_Vegetation").
        - Each value is a list of filenames (e.g., ["Case Study_Cutting Vegetation_2020.docx", "Fassade nach Cutting.png"]) to be moved into that directory.
@@ -332,4 +334,4 @@ def execute_the_plan(plan, all_docs, destination_root_str):
     total_files_in_plan = sum(len(f) for f in plan.values())
     summary = f"Execution complete. Moved {files_moved}/{total_files_in_plan} files. Encountered {errors_encountered} errors."
     
-    return {"message": summary, "log": log}
+    return {"message": summary, "log": log, "errors_encountered": errors_encountered}
