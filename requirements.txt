@@ -1,24 +1,16 @@
-# Flask and extensions
-flask
-Flask-Session
-SQLAlchemy
 Werkzeug
-
-# AI and Machine Learning
 genai
+openpyxl
+docling
+docling-core
+python-dotenv
+PyMuPDF
+Flask
+Flask-Session
+Flask-SQLAlchemy
+nltk
+numpy
+pandas
 sentence-transformers
 scikit-learn
 torch
-nltk
-numpy
-
-# Data Handling
-pandas
-openpyxl
-
-# Document Processing
-docling
-docling-core
-
-# Environment variables
-python-dotenv
