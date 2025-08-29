@@ -2,9 +2,10 @@
 flask
 Flask-Session
 SQLAlchemy
+Werkzeug
 
 # AI and Machine Learning
-google-generativeai
+genai
 sentence-transformers
 scikit-learn
 torch
