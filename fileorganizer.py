@@ -143,11 +143,12 @@ def answer_a_question(question: str, all_docs: list, current_analysis: str):
         1.  **Analyze User Intent:** Carefully examine the user's latest message in the context of the entire conversation. Determine the user's primary intent by choosing one of the following two categories:
             A. **New Search Request:**  The user wants to find documents they have not asked for before. This usually involves new topics, keywords, or criteria (e.g., "Find me files about marketing," "Get all resumes with Python experience," "now show me documents about finance").
             B. **Conversational Follow-up:** The user is asking a question, making a statement, or offering a correction about the documents you presented in your immediately preceding response (e.g., "Tell me more about the second file," "Which of these is most recent?", "I think that first document is incorrect.").
-            C. **General Conversation:** The user is not asking about documents (e.g., "hello", "how are you?", "what is your name?"). Then just answer conversationally and do not use the tool.
+            C. **General Conversation:** The user is not asking about documents (e.g., "hello", "how are you?", "what is your name?").
 
         2.  **Decide on an Action:**
             - If the intent is a New Search Request (A): You MUST use the `search_for_document_info` tool to find a new list of documents. Simplify the user's request to a single, broad keyword for the tool (e.g., for 'resumes with >5 years experience', the query is 'experience').
             - If the intent is a Conversational Follow-up (B): You MUST NOT use the search tool again. You will answer using only the information (file paths and summaries) you already have from the previous turn.
+            - If the intent is a General Conversation (C): Just answer conversationally and do not use the tool.
         
         **Stage 2: Formulate and Provide the Answer**
         3.  **Filter & Synthesize (CRUCIAL):** This is your most important task.
@@ -220,30 +221,48 @@ def get_organization_plan(all_docs, current_analysis):
         for doc in all_docs
     ])
     prompt = f"""
-    You are an expert file organization assistant. Based on the following analysis, your task is to organize the files into a logical folder structure and provide a JSON plan, an ASCII file tree, and your reasoning.DO NOT CHANGE THE NAME OF FILES
+    You are an expert file organization assistant. Based on the following analysis of the current file structure, your task is to organize the files listed below into a logical folder structure and provide a JSON plan, an ASCII file tree representation, and a reasoning section explaining the organization.
 
-    **Previous Analysis:**
+    **Previous Analysis of Current Structure:**
     {current_analysis}
 
     **File Information:**
     {documents_str}
 
     **Instructions:**
-    Respond ONLY with a single output containing three clearly separated sections (JSON, file tree, reasoning). DO NOT CHANGE THE FILENAMES IN ANY CASE.
+    Respond ONLY with a single output containing three sections, separated clearly. Do not include any additional text, explanations, or markdown formatting outside the specified structure. DO NOT CHANGE THE NAME OF FILES; KEEP THEM AS THEY ARE.
+
+    1. **JSON Plan**:
+       - A JSON object where each key is the proposed new directory path (e.g., "Case_Studies/2020_Grimmen_Vegetation").
+       - Each value is a list of filenames (e.g., ["Case Study_Cutting Vegetation_2020.docx", "Fassade nach Cutting.png"]) to be moved into that directory.
+       - Use forward slashes (/) for directory paths.
+
+    2. **ASCII File Tree**:
+       - After the JSON, include a line with exactly "-----" to separate sections.
+       - Provide an ASCII file tree representation of the same structure.
+
+    3. **Reasoning**:
+       - After the file tree, include another line with exactly "-----" to separate sections.
+       - Provide a concise explanation (100-200 words) of why this organization plan was chosen.
 
     **Output Format**:
     ```json
     {{
-      "Project_A/Source_Code": ["main.py", "utils.py"]
+      "Case_Studies/2018_Cadolzburg": [
+        "Case Study_Cadolzburg_v1.docx",
+        "ZAE_Modulliste.pdf"
+      ]
     }}
     -----
-    Project_A/
-    └── Source_Code/
-        ├── main.py
-        └── utils.py
+    Case_Studies/
+    └── 2018_Cadolzburg/
+        ├── Case Study_Cadolzburg_v1.docx
+        └── ZAE_Modulliste.pdf
     -----
-    The reasoning for this structure is...
+    The files are organized by project and year...
     ```
+
+    Ensure all files from the input are included in both the JSON and the file tree.
     """
     try:
         # Using a model better suited for complex reasoning and formatting.
@@ -264,42 +283,43 @@ def get_organization_plan(all_docs, current_analysis):
 
 
 def execute_the_plan(plan, all_docs, destination_root_str):
-    """Executes the file moving plan. Does not call the AI."""
+    """Creates directories and moves files based on the provided plan."""
     destination_root = Path(destination_root_str)
     if not destination_root.is_dir():
         try:
+            # Try to create the destination root if it doesn't exist
             os.makedirs(destination_root)
         except Exception as e:
             return {"error": f"Destination root '{destination_root_str}' does not exist and could not be created: {e}"}
-            
+
     file_path_map = create_file_path_map(all_docs)
     log = []
     files_moved = 0
     errors_encountered = 0
-    
+
     for directory, filenames in plan.items():
         new_dir_path = destination_root / Path(directory)
         try:
             os.makedirs(new_dir_path, exist_ok=True)
             log.append(f"[OK] Ensured directory exists: '{new_dir_path}'")
         except OSError as e:
-            log.append(f"[ERROR] Could not create directory '{new_dir_path}'. Error: {e}")
+            log.append(f"[ERROR] Could not create directory '{new_dir_path}'. Skipping. Error: {e}")
             errors_encountered += 1
             continue
-            
+
         for filename in filenames:
             original_path_str = file_path_map.get(filename)
             if not original_path_str:
                 log.append(f"  [WARN] Could not find original path for '{filename}'. Skipping.")
                 errors_encountered += 1
                 continue
-                
+
             original_path = Path(original_path_str)
             if not original_path.exists():
                 log.append(f"  [WARN] Source file does not exist at '{original_path}'. Skipping.")
                 errors_encountered += 1
                 continue
-                
+
             destination_path = new_dir_path / filename
             try:
                 shutil.move(original_path, destination_path)
@@ -308,8 +328,8 @@ def execute_the_plan(plan, all_docs, destination_root_str):
             except Exception as e:
                 log.append(f"  [ERROR] Failed to move '{filename}'. Error: {e}")
                 errors_encountered += 1
-                
+    
     total_files_in_plan = sum(len(f) for f in plan.values())
     summary = f"Execution complete. Moved {files_moved}/{total_files_in_plan} files. Encountered {errors_encountered} errors."
-
+    
     return {"message": summary, "log": log}
