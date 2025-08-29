@@ -4,6 +4,7 @@ import os
 from flask import Flask, render_template, request, jsonify, session # 1. IMPORT 'session'
 from dotenv import load_dotenv
 from flask_session import Session  # 2. IMPORT 'Session' from flask_session
+from flask_sqlalchemy import SQLAlchemy
 
 # Import your refactored functions
 from summarygenerator import run_summary_generation
@@ -14,6 +15,7 @@ load_dotenv()
 
 app = Flask(__name__)
 
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///sessions.db" 
 
 # 4. ADD CONFIGURATION for server-side sessions
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(24)) # Use env var or a random key
@@ -23,9 +25,13 @@ app.config["SESSION_USE_SIGNER"] = True # Sign the session cookie
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///sessions.db" # Database file name
 app.config["SESSION_SQLALCHEMY_TABLE"] = "sessions" # Table name in the database
 
+db = SQLAlchemy(app)
+app.config["SESSION_SQLALCHEMY"] = db
 # 5. INITIALIZE the Session extension
 Session(app)
 
+with app.app_context():
+    db.create_all()
 
 @app.route('/')
 def index():

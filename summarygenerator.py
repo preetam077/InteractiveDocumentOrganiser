@@ -1,4 +1,4 @@
-# summarygenerator.py (Upgraded with Threading)
+# summarygenerator.py (Upgraded with Hybrid Extraction)
 
 import os
 import json
@@ -15,7 +15,9 @@ import warnings
 from torch.utils.data import dataloader
 import time
 from pathlib import Path
-import concurrent.futures # --- NEW ---
+from textwrap import wrap
+import fitz  # --- NEW: Import PyMuPDF ---
+import concurrent.futures
 
 # --- ONE-TIME SETUP (Unchanged) ---
 warnings.filterwarnings(
@@ -29,14 +31,19 @@ warnings.filterwarnings("ignore",
     category=UserWarning,
     module=dataloader.__name__
 )
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    print("Downloading NLTK punkt resource...")
-    nltk.download('punkt')
 
 embed_model = None
 converter = None
+def worker_init():
+    """
+    Initializer function for each worker process.
+    Loads the ML models into the global scope of the worker.
+    """
+    global embed_model, converter
+    print(f"Initializing models in process ID: {os.getpid()}")
+    embed_model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
+    converter = DocumentConverter()
+    print(f"Models loaded for process ID: {os.getpid()}")
 
 supported_extensions = {
     '.pdf', '.docx', '.pptx', '.xlsx', '.html',
@@ -44,10 +51,8 @@ supported_extensions = {
     '.adoc', '.md', '.wav', '.mp3'
 }
 
-# --- HELPER FUNCTIONS (Unchanged) ---
-def generate_summary(text: str, doc_embedding: np.ndarray, summary_lengths: list, cosine_similarities: list, max_sentences: int = 5, is_table: bool = False) -> str:
-    # This function is being modified to be self-contained for threading
-    # It now returns the summary and also the new lengths/similarities it generated
+# --- HELPER FUNCTIONS ---
+def generate_summary(text: str, doc_embedding: np.ndarray, summary_lengths: list, cosine_similarities: list, max_sentences: int = 5, is_table: bool = False) -> Tuple[str, int, list]:
     if not text.strip():
         return "No content available for summary.", 0, []
     try:
@@ -61,7 +66,7 @@ def generate_summary(text: str, doc_embedding: np.ndarray, summary_lengths: list
         else:
             sentences = sent_tokenize(text)
             if not sentences: return "No sentences detected for summary.", 0, []
-            sentence_embeddings = embed_model.encode(sentences)
+            sentence_embeddings = embed_model.encode(sentences, batch_size=32, show_progress_bar=False)
             similarities = cosine_similarity([doc_embedding], sentence_embeddings)[0]
             top_indices = np.argsort(similarities)[-max_sentences:]
             top_sentences = [sentences[i] for i in sorted(top_indices) if similarities[i] > 0.1]
@@ -70,7 +75,7 @@ def generate_summary(text: str, doc_embedding: np.ndarray, summary_lengths: list
             final_summary = summary if summary else "Unable to generate summary due to low similarity."
             return final_summary, summary_len, similarities.tolist()
     except Exception as e:
-        print(f"  -> Error generating summary: {str(e)}")
+        print(f"   -> Error generating summary: {str(e)}")
         return "Summary generation failed.", 0, []
 
 def extract_excel_text(file_path: str) -> str:
@@ -86,55 +91,109 @@ def extract_excel_text(file_path: str) -> str:
                 if row_text: all_text.append(row_text)
         return "\n".join(all_text)
     except Exception as e:
-        print(f"  -> Error reading Excel file {file_path} with pandas: {str(e)}")
+        print(f"   -> Error reading Excel file {file_path} with pandas: {str(e)}")
         return ""
 
-# --- NEW: WORKER FUNCTION FOR A SINGLE FILE ---
+# --- NEW: HYBRID TEXT EXTRACTOR ---
+def extract_text_hybrid(file_path: str, file_ext: str) -> str:
+    """
+    Extracts text using a smart hybrid approach.
+    - Tries the fast PyMuPDF for PDFs.
+    - If PyMuPDF returns very little text (indicating a scanned PDF),
+      it automatically falls back to the docling converter for OCR.
+    - Uses docling for all other file types.
+    """
+    print(f" -> Running hybrid extractor for '{os.path.basename(file_path)}'...")
+    if file_ext == '.pdf':
+        try:
+            # --- PLAN A: Try the fast PyMuPDF method first ---
+            with fitz.open(file_path) as doc:
+                text_parts = [page.get_text() for page in doc]
+                full_text = "\n".join(text_parts).strip()
+                
+                # --- SMART DETECTION LOGIC ---
+                # If the text is very short (e.g., less than 20 chars per page),
+                # assume it's a scanned PDF and needs OCR.
+                if len(full_text) < (len(doc) * 20):
+                    print("   -> PyMuPDF found little text. Assuming scanned PDF, falling back to docling for OCR.")
+                    raise ValueError("Potential scanned document detected.") # Intentionally trigger fallback
+            
+            return full_text # Return the fast result if it was good
+        except Exception as e:
+            # --- PLAN B: Fallback to docling for OCR or on any error ---
+            print(f"   -> PyMuPDF failed or fallback triggered: {e}. Using docling converter.")
+            conv_res = converter.convert(file_path)
+            if conv_res.document:
+                return "\n".join([item.text for item in conv_res.document.texts if item.text]).strip()
+            return ""
+
+    elif file_ext == '.xlsx':
+        return extract_excel_text(file_path)
+    
+    else: # For .docx, .pptx, and all others, use the original docling converter
+        conv_res = converter.convert(file_path)
+        if conv_res.document:
+            doc: DoclingDocument = conv_res.document
+            text_parts = [item.text for item in doc.texts if item.text]
+            for table in doc.tables:
+                for row in table.data:
+                    for cell in row:
+                        cell_text = getattr(cell, 'text', str(cell))
+                        if cell_text: text_parts.append(cell_text)
+            return "\n".join(text_parts).strip()
+    return ""
+
+# --- MODIFIED: WORKER FUNCTION FOR A SINGLE FILE ---
 def process_single_file(file_path: str) -> Dict[str, Any]:
     """
-    This function contains all the logic to process one file.
-    It's designed to be run in a separate thread.
-    It returns a dictionary with the results for thread-safe collection.
+    Processes a single file using the hybrid text extractor and adaptive summarization.
     """
-    global embed_model, converter
-    if embed_model is None:
-        print(f"Initializing models in process ID: {os.getpid()}")
-        embed_model = SentenceTransformer('all-MiniLM-L6-v2')
-        converter = DocumentConverter()
-        print(f"Models loaded for process ID: {os.getpid()}")
-
+    CHUNKING_WORD_THRESHOLD = 2000
     start_time = time.time()
     try:
-        print(f"Processing: {file_path} in process {os.getpid()}")
+        print(f"Processing: {os.path.basename(file_path)} in process {os.getpid()}")
         ext = os.path.splitext(file_path)[1].lower()
         llm_dict: Dict = {'file_path': file_path, 'type': ext, 'summary': ""}
         
-        full_text = ""
-        if ext == '.xlsx':
-            full_text = extract_excel_text(file_path)
-        else:
-            conv_res = converter.convert(file_path)
-            if conv_res.document:
-                doc: DoclingDocument = conv_res.document
-                text_parts = [item.text for item in doc.texts if item.text]
-                for table in doc.tables:
-                    for row in table.data:
-                        for cell in row:
-                            cell_text = getattr(cell, 'text', str(cell)) if not isinstance(cell, str) else cell
-                            if cell_text: text_parts.append(cell_text)
-                full_text = "\n".join(text_parts).strip()
+        # --- MODIFIED: Use the new hybrid extractor function ---
+        full_text = extract_text_hybrid(file_path, ext)
         
         summary_len = 0
         similarities = []
-        if full_text:
+        if not full_text:
+            llm_dict['summary'] = "No content available for summary."
+        # --- ADAPTIVE LOGIC (Unchanged) ---
+        elif len(full_text.split()) > CHUNKING_WORD_THRESHOLD:
+            # --- PATH 1: Large Document -> Use Hierarchical Chunking ---
+            print(f" -> Large document ({len(full_text.split())} words). Applying hierarchical summary...")
+            chunks = wrap(full_text, width=8000, break_long_words=False, replace_whitespace=False)
+            intermediate_summaries = []
+            for chunk in chunks:
+                if not chunk.strip(): continue
+                chunk_embedding = embed_model.encode(chunk)
+                intermediate_summary, _, _ = generate_summary(
+                    chunk, chunk_embedding, [], [], max_sentences=2 
+                )
+                if "generation failed" not in intermediate_summary and "No content" not in intermediate_summary:
+                    intermediate_summaries.append(intermediate_summary)
+            
+            final_text_to_summarize = " ".join(intermediate_summaries)
+            if final_text_to_summarize:
+                final_embedding = embed_model.encode(final_text_to_summarize)
+                summary, summary_len, similarities = generate_summary(
+                    final_text_to_summarize, final_embedding, [], [], max_sentences=5
+                )
+                llm_dict['summary'] = summary
+            else:
+                llm_dict['summary'] = "Failed to generate intermediate summaries for chunked document."
+        else:
+            # --- PATH 2: Small/Medium Document -> Use Original Method ---
+            print(f" -> Standard document ({len(full_text.split())} words). Processing directly.")
             doc_embedding = embed_model.encode(full_text)
-            # Dummy lists that won't be used, as we capture the return values
             summary, summary_len, similarities = generate_summary(
                 full_text, doc_embedding, [], [], is_table=(ext == '.xlsx')
             )
             llm_dict['summary'] = summary
-        else:
-            llm_dict['summary'] = "No content available for summary."
 
         return {
             "status": "success",
@@ -152,12 +211,15 @@ def process_single_file(file_path: str) -> Dict[str, Any]:
             "processing_time": time.time() - start_time
         }
 
-# --- MAIN CALLABLE FUNCTION (MODIFIED with Threading) ---
-def run_summary_generation(base_path_str: str, max_workers: int = None): # Added max_workers parameter
-    """
-    Scans a directory, generates summaries for new files using multiple threads, and saves the output.
-    Returns a dictionary containing a status message and KPI report.
-    """
+# --- MAIN CALLABLE FUNCTION (Unchanged) ---
+def run_summary_generation(base_path_str: str, max_workers: int = None):
+    # ... (The rest of your code is unchanged) ...
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        print("Downloading NLTK punkt resource...")
+        nltk.download('punkt')
+
     if max_workers is None:
         max_workers = os.cpu_count() or 4
         print(f"--- Auto-detected {max_workers} CPU cores to use as workers. ---")
@@ -186,7 +248,7 @@ def run_summary_generation(base_path_str: str, max_workers: int = None): # Added
     summary_lengths: List[int] = []
     cosine_similarities: List[float] = []
 
-    # Step 1: Scan and determine files to process (Unchanged logic)
+    # Step 1: Scan and determine files to process
     print(f"Scanning {base_path} for all supported documents...")
     files_on_disk = [os.path.join(root, file) for root, _, files in os.walk(base_path) for file in files if os.path.splitext(file)[1].lower() in supported_extensions]
     if not files_on_disk:
@@ -211,17 +273,14 @@ def run_summary_generation(base_path_str: str, max_workers: int = None): # Added
     else:
         print(f"---> Processing {len(files_to_process)} new file(s) using up to {max_workers} threads...")
 
-    # --- MODIFIED: Process new documents using a ProcessPoolExecutor ---
+    # Process new documents using a ProcessPoolExecutor
     if files_to_process:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all file processing tasks to the executor
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers,initializer=worker_init) as executor:
             future_to_file = {executor.submit(process_single_file, file_path): file_path for file_path in files_to_process}
             
-            # Process results as they are completed
             for future in concurrent.futures.as_completed(future_to_file):
                 result = future.result()
                 
-                # This part is now thread-safe because we are processing results one by one in the main thread
                 processing_times.append(result["processing_time"])
                 
                 if result["status"] == "success":
@@ -233,7 +292,7 @@ def run_summary_generation(base_path_str: str, max_workers: int = None): # Added
                 else: # status == "error"
                     error_count += 1
     
-    # --- Step 3 & 4: Saving and Reporting (Unchanged Logic) ---
+    # Saving and Reporting
     final_llm_input_data = list(summary_cache.values())
     try:
         with open(llm_output_file, 'w', encoding='utf-8') as f:
